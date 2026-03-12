@@ -4,7 +4,14 @@ const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://gufo-frontend-six.vercel.app",
+    "https://gufo-frontend.vercel.app"
+  ],
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-partner-key"]
+}));
 app.use(express.json());
 
 const supabase = createClient(
