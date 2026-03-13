@@ -8,25 +8,10 @@ const app = express();
 // =============================
 // CORS
 // =============================
-const allowedOrigins = [
-  "https://gufo-frontend-six.vercel.app",
-  "https://gufo-frontend.vercel.app",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-];
-
+// CORS
 app.use(
   cors({
-    origin: function (origin, callback) {
-      // Permette richieste senza origin (Postman, test server-to-server)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(new Error("CORS non consentito per questo origin"));
-    },
+    origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "x-partner-key"],
   })
