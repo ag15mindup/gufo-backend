@@ -4,16 +4,39 @@ const { createClient } = require("@supabase/supabase-js");
 require("dotenv").config();
 
 const app = express();
-app.use(cors({
-  origin: [
-    "https://gufo-frontend-six.vercel.app",
-    "https://gufo-frontend.vercel.app"
-  ],
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-partner-key"]
-}));
+
+// =============================
+// CORS
+// =============================
+const allowedOrigins = [
+  "https://gufo-frontend-six.vercel.app",
+  "https://gufo-frontend.vercel.app",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      // Permette richieste senza origin (Postman, test server-to-server)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(new Error("CORS non consentito per questo origin"));
+    },
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "x-partner-key"],
+  })
+);
+
 app.use(express.json());
 
+// =============================
+// SUPABASE
+// =============================
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_KEY
@@ -202,7 +225,6 @@ function getTxAmount(tx) {
     "value",
   ]);
 
-
   return toNumberSafe(rawAmount);
 }
 
@@ -300,26 +322,27 @@ async function getTransactions(userId) {
 }
 
 function sumAmount(transactions) {
-  return transactions.reduce((sum, tx) => sum + getTxAmount(tx), 0);
+  return transactions.reduce((sum, tx) => sum + toNumberSafe(tx.amount_euro), 0);
 }
 
 function sumGufo(transactions) {
-  return transactions.reduce((sum, tx) => sum + getTxGufo(tx), 0);
+  return transactions.reduce((sum, tx) => sum + toNumberSafe(tx.gufo_earned), 0);
 }
 
 function buildMonthlyExpenses(transactions) {
   const monthlyExpenses = Array(12).fill(0);
 
   transactions.forEach((tx) => {
-    const dateValue = getTxDate(tx);
+    const dateValue = tx.created_at;
     const date = new Date(dateValue);
+
     if (!Number.isNaN(date.getTime())) {
       const month = date.getMonth();
-      monthlyExpenses[month] += getTxAmount(tx);
+      monthlyExpenses[month] += toNumberSafe(tx.amount_euro);
     }
   });
 
-  return monthlyExpenses;
+  return monthlyExpenses.map((v) => Number(v.toFixed(2)));
 }
 
 function filterSeasonTransactions(transactions, seasonStart) {
@@ -328,7 +351,7 @@ function filterSeasonTransactions(transactions, seasonStart) {
   const startDate = new Date(seasonStart);
 
   return transactions.filter((tx) => {
-    const txDate = new Date(getTxDate(tx));
+    const txDate = new Date(tx.created_at);
     return !Number.isNaN(txDate.getTime()) && txDate >= startDate;
   });
 }
@@ -543,8 +566,6 @@ app.post("/simulate-payment", async (req, res) => {
 
     const amount = Number(amount_euro);
 
-    
-
     if (Number.isNaN(amount) || amount <= 0) {
       return res.status(400).json({
         error: "amount_euro deve essere un numero maggiore di 0",
@@ -559,7 +580,9 @@ app.post("/simulate-payment", async (req, res) => {
     const cashbackPercent = getCashbackPercentFromLevel(
       seasonStats.currentLevel.name
     );
+
     const gufoEarned = calculateGufoEarned(amount, cashbackPercent);
+
     const newBalanceGufo = Number(
       (Number(wallet.balance_gufo || 0) + gufoEarned).toFixed(2)
     );
@@ -577,20 +600,21 @@ app.post("/simulate-payment", async (req, res) => {
     }
 
     const { data: transaction, error: transactionError } = await supabase
-  .from("transactions")
-  .insert([
-    {
-      user_id,
-      amount: amount,
-      gufo_earned: gufoEarned,
-      cashback: cashbackPercent,
-      benefit: merchant_name || "Merchant Test",
-      tipo: "cashback",
-      created_at: new Date().toISOString(),
-    },
-  ])
-  .select()
-  .single();
+      .from("transactions")
+      .insert([
+        {
+          user_id,
+          amount: amount,
+          gufo_earned: gufoEarned,
+          cashback: cashbackPercent,
+          benefit: merchant_name || "Merchant Test",
+          tipo: "cashback",
+          created_at: new Date().toISOString(),
+        },
+      ])
+      .select()
+      .single();
+
     if (transactionError) {
       return res.status(500).json({ error: transactionError.message });
     }
@@ -614,18 +638,20 @@ app.post("/simulate-payment", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.post("/transaction", async (req, res) => {
   try {
     const partnerApiKey = req.headers["x-partner-key"];
 
-if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
-  return res.status(401).json({
-    error: "Partner non autorizzato",
-  });
-}
+    if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
+      return res.status(401).json({
+        error: "Partner non autorizzato",
+      });
+    }
+
     const { user_id, amount, merchant_name } = req.body;
 
-    if (!user_id || !amount) {
+    if (!user_id || amount === undefined || amount === null) {
       return res.status(400).json({
         error: "user_id e amount sono obbligatori",
       });
@@ -654,7 +680,7 @@ if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
       (Number(wallet.balance_gufo || 0) + gufoEarned).toFixed(2)
     );
 
-    await supabase
+    const { error: walletUpdateError } = await supabase
       .from("wallet")
       .update({
         balance_gufo: newBalanceGufo,
@@ -662,7 +688,11 @@ if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
       })
       .eq("user_id", user_id);
 
-    const { data: transaction, error } = await supabase
+    if (walletUpdateError) {
+      return res.status(500).json({ error: walletUpdateError.message });
+    }
+
+    const { data: transaction, error: transactionError } = await supabase
       .from("transactions")
       .insert([
         {
@@ -678,8 +708,8 @@ if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
       .select()
       .single();
 
-    if (error) {
-      return res.status(500).json({ error: error.message });
+    if (transactionError) {
+      return res.status(500).json({ error: transactionError.message });
     }
 
     res.json({
@@ -692,6 +722,7 @@ if (!partnerApiKey || partnerApiKey !== process.env.PARTNER_API_KEY) {
     res.status(500).json({ error: err.message });
   }
 });
+
 app.post("/season-reset/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -723,6 +754,19 @@ app.post("/season-reset/:userId", async (req, res) => {
   }
 });
 
+// =============================
+// ERROR HANDLER
+// =============================
+app.use((err, req, res, next) => {
+  console.error("Errore server:", err.message);
+  res.status(500).json({
+    error: err.message || "Errore interno del server",
+  });
+});
+
+// =============================
+// START SERVER
+// =============================
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
