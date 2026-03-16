@@ -8,7 +8,6 @@ const app = express();
 // =============================
 // CORS
 // =============================
-// CORS
 app.use(
   cors({
     origin: "*",
@@ -37,8 +36,9 @@ const LEVELS = [
   { name: "gold", min: 1000, cashback: 5 },
   { name: "platino", min: 2500, cashback: 6 },
   { name: "vip", min: 5000, cashback: 7 },
-  { name: "elite", min: 10000, cashback: 8 },
-  { name: "millionaire", min: 50000, cashback: 10 },
+  { name: "elite", min: 10000, cashback: 7 },
+  { name: "diamond", min: 25000, cashback: 6 },
+  { name: "millionaire", min: 50000, cashback: 5 },
 ];
 
 function getLevelFromSpent(totalSpent) {
@@ -84,6 +84,7 @@ function getDowngradedLevel(currentLevelName) {
   if (
     currentName === "vip" ||
     currentName === "elite" ||
+    currentName === "diamond" ||
     currentName === "millionaire"
   ) {
     return LEVELS[Math.max(index - 1, 0)];
@@ -196,6 +197,7 @@ function getTxMerchant(tx) {
       "brand",
       "merchant",
       "store_name",
+      "partner_name",
     ]) || "-"
   );
 }
@@ -257,6 +259,11 @@ function normalizeTransaction(tx) {
     amount_euro: getTxAmount(tx),
     gufo_earned: getTxGufo(tx),
     created_at: getTxDate(tx),
+    partner_id: firstDefined(tx, ["partner_id"]) || null,
+    category: firstDefined(tx, ["category"]) || null,
+    cashback_percent: toNumberSafe(
+      firstDefined(tx, ["cashback", "cashback_percent"])
+    ),
     raw: tx,
   };
 }
@@ -304,6 +311,23 @@ async function getTransactions(userId) {
   }
 
   return (data || []).map(normalizeTransaction);
+}
+
+async function getPartnerByName(partnerName) {
+  const name = String(partnerName || "").trim();
+  if (!name) return null;
+
+  const { data, error } = await supabase
+    .from("partners")
+    .select("id, name, category, cashback_percent")
+    .ilike("name", name)
+    .single();
+
+  if (error) {
+    return null;
+  }
+
+  return data;
 }
 
 function sumAmount(transactions) {
@@ -415,6 +439,8 @@ app.get("/debug/transactions/:userId", async (req, res) => {
         amount_euro: tx.amount_euro,
         gufo_earned: tx.gufo_earned,
         created_at: tx.created_at,
+        partner_id: tx.partner_id,
+        category: tx.category,
         raw: tx.raw,
       })),
     });
@@ -539,6 +565,43 @@ app.get("/profile/:userId", async (req, res) => {
   }
 });
 
+app.get("/partner/customer", async (req, res) => {
+  try {
+    const { code } = req.query;
+
+    if (!code) {
+      return res.status(400).json({ error: "Codice cliente obbligatorio" });
+    }
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, customer_code")
+      .eq("customer_code", code)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: "Cliente non trovato" });
+    }
+
+    await applySeasonDowngradeIfNeeded(data.id);
+
+    const wallet = await getWallet(data.id);
+    const seasonStats = await getSeasonStats(data.id);
+
+    return res.json({
+      id: data.id,
+      customer_code: data.customer_code,
+      balance_gufo: Number(wallet.balance_gufo || 0),
+      balance_eur: Number(wallet.balance_eur || 0),
+      level: seasonStats.currentLevel.name,
+      cashback_percent: seasonStats.currentLevel.cashback,
+      season_spent: Number(seasonStats.seasonSpent.toFixed(2)),
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.post("/simulate-payment", async (req, res) => {
   try {
     const { user_id, amount_euro, merchant_name } = req.body;
@@ -572,6 +635,11 @@ app.post("/simulate-payment", async (req, res) => {
       (Number(wallet.balance_gufo || 0) + gufoEarned).toFixed(2)
     );
 
+    const partner = await getPartnerByName(merchant_name);
+    const finalMerchantName = partner?.name || merchant_name || "Merchant Test";
+    const finalCategory = partner?.category || null;
+    const finalPartnerId = partner?.id || null;
+
     const { error: walletUpdateError } = await supabase
       .from("wallet")
       .update({
@@ -592,9 +660,12 @@ app.post("/simulate-payment", async (req, res) => {
           amount: amount,
           gufo_earned: gufoEarned,
           cashback: cashbackPercent,
-          benefit: merchant_name || "Merchant Test",
+          partner_id: finalPartnerId,
+          benefit: finalMerchantName,
+          category: finalCategory,
           tipo: "cashback",
           created_at: new Date().toISOString(),
+          status: "completed",
         },
       ])
       .select()
@@ -665,6 +736,11 @@ app.post("/transaction", async (req, res) => {
       (Number(wallet.balance_gufo || 0) + gufoEarned).toFixed(2)
     );
 
+    const partner = await getPartnerByName(merchant_name);
+    const finalMerchantName = partner?.name || merchant_name || "Partner";
+    const finalCategory = partner?.category || null;
+    const finalPartnerId = partner?.id || null;
+
     const { error: walletUpdateError } = await supabase
       .from("wallet")
       .update({
@@ -685,9 +761,12 @@ app.post("/transaction", async (req, res) => {
           amount: value,
           gufo_earned: gufoEarned,
           cashback: cashbackPercent,
-          benefit: merchant_name || "Partner",
+          partner_id: finalPartnerId,
+          benefit: finalMerchantName,
+          category: finalCategory,
           tipo: "cashback",
           created_at: new Date().toISOString(),
+          status: "completed",
         },
       ])
       .select()
@@ -702,6 +781,8 @@ app.post("/transaction", async (req, res) => {
       transaction,
       gufo_earned: gufoEarned,
       new_balance: newBalanceGufo,
+      partner_id: finalPartnerId,
+      merchant_name: finalMerchantName,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -733,6 +814,55 @@ app.post("/season-reset/:userId", async (req, res) => {
         cashback_percent: after.currentLevel.cashback,
         last_season_reset: after.profile.last_season_reset,
       },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/partner/stats", async (req, res) => {
+  try {
+    const partnerId = req.query.partner_id
+      ? Number(req.query.partner_id)
+      : null;
+
+    let query = supabase
+      .from("transactions")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (partnerId) {
+      query = query.eq("partner_id", partnerId);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const transactions = (data || []).map(normalizeTransaction);
+
+    const totalTransactions = transactions.length;
+
+    const totalAmount = transactions.reduce(
+      (sum, tx) => sum + Number(tx.amount_euro || 0),
+      0
+    );
+
+    const totalGufo = transactions.reduce(
+      (sum, tx) => sum + Number(tx.gufo_earned || 0),
+      0
+    );
+
+    const recentTransactions = transactions.slice(0, 10);
+
+    res.json({
+      total_transactions: totalTransactions,
+      total_amount: Number(totalAmount.toFixed(2)),
+      total_gufo_distributed: Number(totalGufo.toFixed(2)),
+      recent_transactions: recentTransactions,
+      partner_id: partnerId,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
