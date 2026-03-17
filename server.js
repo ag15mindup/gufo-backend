@@ -271,10 +271,24 @@ function normalizeTransaction(tx) {
 // =============================
 // DB
 // =============================
-async function getProfile(userId) {
+async function getProfileByCustomerCode(customerCode) {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, last_season_reset")
+    .select("id, customer_code, last_season_reset")
+    .eq("customer_code", customerCode)
+    .single();
+
+  if (error) {
+    throw new Error(`Errore profile: ${error.message}`);
+  }
+
+  return data;
+}
+
+async function getProfileById(userId) {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, customer_code, last_season_reset")
     .eq("id", userId)
     .single();
 
@@ -285,7 +299,29 @@ async function getProfile(userId) {
   return data;
 }
 
-async function getWallet(userId) {
+async function resolveUserId(userIdOrCode) {
+  const value = String(userIdOrCode || "").trim();
+
+  if (!value) {
+    throw new Error("userId mancante");
+  }
+
+  if (value.startsWith("GUFO-")) {
+    const profile = await getProfileByCustomerCode(value);
+    return profile.id;
+  }
+
+  return value;
+}
+
+async function getProfile(userIdOrCode) {
+  const userId = await resolveUserId(userIdOrCode);
+  return await getProfileById(userId);
+}
+
+async function getWallet(userIdOrCode) {
+  const userId = await resolveUserId(userIdOrCode);
+
   const { data, error } = await supabase
     .from("wallet")
     .select("*")
@@ -299,7 +335,9 @@ async function getWallet(userId) {
   return data;
 }
 
-async function getTransactions(userId) {
+async function getTransactions(userIdOrCode) {
+  const userId = await resolveUserId(userIdOrCode);
+
   const { data, error } = await supabase
     .from("transactions")
     .select("*")
@@ -404,7 +442,7 @@ async function applySeasonDowngradeIfNeeded(userId) {
     .update({
       last_season_reset: newSeasonValue,
     })
-    .eq("id", userId);
+    .eq("id", profile.id);
 
   if (error) {
     throw new Error(`Errore update profile season reset: ${error.message}`);
@@ -620,10 +658,12 @@ app.post("/simulate-payment", async (req, res) => {
       });
     }
 
-    await applySeasonDowngradeIfNeeded(user_id);
+    const resolvedUserId = await resolveUserId(user_id);
 
-    const wallet = await getWallet(user_id);
-    const seasonStats = await getSeasonStats(user_id);
+    await applySeasonDowngradeIfNeeded(resolvedUserId);
+
+    const wallet = await getWallet(resolvedUserId);
+    const seasonStats = await getSeasonStats(resolvedUserId);
 
     const cashbackPercent = getCashbackPercentFromLevel(
       seasonStats.currentLevel.name
@@ -646,7 +686,7 @@ app.post("/simulate-payment", async (req, res) => {
         balance_gufo: newBalanceGufo,
         updated_at: new Date().toISOString(),
       })
-      .eq("user_id", user_id);
+      .eq("user_id", resolvedUserId);
 
     if (walletUpdateError) {
       return res.status(500).json({ error: walletUpdateError.message });
@@ -656,7 +696,7 @@ app.post("/simulate-payment", async (req, res) => {
       .from("transactions")
       .insert([
         {
-          user_id,
+          user_id: resolvedUserId,
           amount: amount,
           gufo_earned: gufoEarned,
           cashback: cashbackPercent,
@@ -675,7 +715,7 @@ app.post("/simulate-payment", async (req, res) => {
       return res.status(500).json({ error: transactionError.message });
     }
 
-    const updatedSeasonStats = await getSeasonStats(user_id);
+    const updatedSeasonStats = await getSeasonStats(resolvedUserId);
 
     res.json({
       success: true,
@@ -721,10 +761,12 @@ app.post("/transaction", async (req, res) => {
       });
     }
 
-    await applySeasonDowngradeIfNeeded(user_id);
+    const resolvedUserId = await resolveUserId(user_id);
 
-    const wallet = await getWallet(user_id);
-    const seasonStats = await getSeasonStats(user_id);
+    await applySeasonDowngradeIfNeeded(resolvedUserId);
+
+    const wallet = await getWallet(resolvedUserId);
+    const seasonStats = await getSeasonStats(resolvedUserId);
 
     const cashbackPercent = getCashbackPercentFromLevel(
       seasonStats.currentLevel.name
@@ -747,7 +789,7 @@ app.post("/transaction", async (req, res) => {
         balance_gufo: newBalanceGufo,
         updated_at: new Date().toISOString(),
       })
-      .eq("user_id", user_id);
+      .eq("user_id", resolvedUserId);
 
     if (walletUpdateError) {
       return res.status(500).json({ error: walletUpdateError.message });
@@ -757,7 +799,7 @@ app.post("/transaction", async (req, res) => {
       .from("transactions")
       .insert([
         {
-          user_id,
+          user_id: resolvedUserId,
           amount: value,
           gufo_earned: gufoEarned,
           cashback: cashbackPercent,
