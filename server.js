@@ -274,7 +274,7 @@ function normalizeTransaction(tx) {
 async function getProfileByCustomerCode(customerCode) {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, customer_code, last_season_reset")
+    .select("*")
     .eq("customer_code", customerCode)
     .single();
 
@@ -288,7 +288,7 @@ async function getProfileByCustomerCode(customerCode) {
 async function getProfileById(userId) {
   const { data, error } = await supabase
     .from("profiles")
-    .select("id, customer_code, last_season_reset")
+    .select("*")
     .eq("id", userId)
     .single();
 
